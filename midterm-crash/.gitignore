@@ -1,0 +1,10 @@
+*.exe
+*.dll
+*.so
+*.dylib
+go.sum
+.idea/
+.vscode/
+.DS_Store
+__pycache__/
+*.pyc
