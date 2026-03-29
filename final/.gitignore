@@ -1,0 +1,29 @@
+# Go binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go build/test
+/api/api-service
+/worker/worker-service
+/target-service/target-service
+
+# Go dependencies
+go.sum
+
+# Terraform
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+terraform/*.tfvars
+
+# Docker
+.DS_Store
+
+# Python
+locust/__pycache__/
+locust/*.pyc
+*.egg-info/
