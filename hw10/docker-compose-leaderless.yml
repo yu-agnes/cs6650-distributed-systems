@@ -1,0 +1,82 @@
+version: "3.8"
+
+# Usage: docker compose -f docker-compose-leaderless.yml up --build
+#
+# All 5 nodes are identical. Any node can receive client requests.
+# W=5 (all nodes must ack a write), R=1 (read from local only).
+
+services:
+  node1:
+    build:
+      context: .
+      dockerfile: leaderless/Dockerfile
+    container_name: leaderless1
+    ports:
+      - "8081:8080"
+    environment:
+      - ROLE=node
+      - PORT=8080
+      - PEERS=node2:8080,node3:8080,node4:8080,node5:8080
+      - N=5
+      - W=5
+      - R=1
+
+  node2:
+    build:
+      context: .
+      dockerfile: leaderless/Dockerfile
+    container_name: leaderless2
+    ports:
+      - "8082:8080"
+    environment:
+      - ROLE=node
+      - PORT=8080
+      - PEERS=node1:8080,node3:8080,node4:8080,node5:8080
+      - N=5
+      - W=5
+      - R=1
+
+  node3:
+    build:
+      context: .
+      dockerfile: leaderless/Dockerfile
+    container_name: leaderless3
+    ports:
+      - "8083:8080"
+    environment:
+      - ROLE=node
+      - PORT=8080
+      - PEERS=node1:8080,node2:8080,node4:8080,node5:8080
+      - N=5
+      - W=5
+      - R=1
+
+  node4:
+    build:
+      context: .
+      dockerfile: leaderless/Dockerfile
+    container_name: leaderless4
+    ports:
+      - "8084:8080"
+    environment:
+      - ROLE=node
+      - PORT=8080
+      - PEERS=node1:8080,node2:8080,node3:8080,node5:8080
+      - N=5
+      - W=5
+      - R=1
+
+  node5:
+    build:
+      context: .
+      dockerfile: leaderless/Dockerfile
+    container_name: leaderless5
+    ports:
+      - "8085:8080"
+    environment:
+      - ROLE=node
+      - PORT=8080
+      - PEERS=node1:8080,node2:8080,node3:8080,node4:8080
+      - N=5
+      - W=5
+      - R=1

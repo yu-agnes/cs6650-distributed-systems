@@ -1,0 +1,82 @@
+version: "3.8"
+
+# Usage:
+#   W=5 R=1:  W=5 R=1 docker compose -f docker-compose-leader.yml up --build
+#   W=1 R=5:  W=1 R=5 docker compose -f docker-compose-leader.yml up --build
+#   W=3 R=3:  W=3 R=3 docker compose -f docker-compose-leader.yml up --build
+
+services:
+  node1:
+    build:
+      context: .
+      dockerfile: leader-follower/Dockerfile
+    container_name: leader
+    ports:
+      - "8081:8080"
+    environment:
+      - ROLE=leader
+      - PORT=8080
+      - PEERS=node2:8080,node3:8080,node4:8080,node5:8080
+      - N=5
+      - W=${W:-5}
+      - R=${R:-1}
+
+  node2:
+    build:
+      context: .
+      dockerfile: leader-follower/Dockerfile
+    container_name: follower1
+    ports:
+      - "8082:8080"
+    environment:
+      - ROLE=follower
+      - PORT=8080
+      - PEERS=node1:8080,node3:8080,node4:8080,node5:8080
+      - N=5
+      - W=${W:-5}
+      - R=${R:-1}
+
+  node3:
+    build:
+      context: .
+      dockerfile: leader-follower/Dockerfile
+    container_name: follower2
+    ports:
+      - "8083:8080"
+    environment:
+      - ROLE=follower
+      - PORT=8080
+      - PEERS=node1:8080,node2:8080,node4:8080,node5:8080
+      - N=5
+      - W=${W:-5}
+      - R=${R:-1}
+
+  node4:
+    build:
+      context: .
+      dockerfile: leader-follower/Dockerfile
+    container_name: follower3
+    ports:
+      - "8084:8080"
+    environment:
+      - ROLE=follower
+      - PORT=8080
+      - PEERS=node1:8080,node2:8080,node3:8080,node5:8080
+      - N=5
+      - W=${W:-5}
+      - R=${R:-1}
+
+  node5:
+    build:
+      context: .
+      dockerfile: leader-follower/Dockerfile
+    container_name: follower4
+    ports:
+      - "8085:8080"
+    environment:
+      - ROLE=follower
+      - PORT=8080
+      - PEERS=node1:8080,node2:8080,node3:8080,node4:8080
+      - N=5
+      - W=${W:-5}
+      - R=${R:-1}
