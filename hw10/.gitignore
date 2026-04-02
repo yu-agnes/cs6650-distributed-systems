@@ -1,0 +1,6 @@
+# Generated archives
+*.tar.gz
+*.zip
+
+# Build output
+/bin/
