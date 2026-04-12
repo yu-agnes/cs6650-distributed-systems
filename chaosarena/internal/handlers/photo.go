@@ -27,25 +27,27 @@ func NewPhotoHandler(db *store.DynamoStore, s3 *store.S3Store, sqs *store.SQSSto
 	return &PhotoHandler{db: db, s3: s3, sqs: sqs}
 }
 
+// albumResult carries the result of an async GetAlbum call.
+type albumResult struct {
+	album *models.Album
+	err   error
+}
+
 // UploadPhoto handles POST /albums/:album_id/photos
-// Small files (≤5MB): return 202 immediately, upload S3+SQS asynchronously.
-// Large files (>5MB): upload S3 synchronously, then return 202.
+// Small files (≤5MB): return 202 immediately, upload S3 + mark completed asynchronously (no SQS).
+// Large files (>5MB): upload S3 synchronously, send SQS, then return 202.
 func (h *PhotoHandler) UploadPhoto(c *gin.Context) {
 	albumID := c.Param("album_id")
 	ctx := c.Request.Context()
 
-	// Verify the album exists
-	album, err := h.db.GetAlbum(ctx, albumID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check album"})
-		return
-	}
-	if album == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
-		return
-	}
+	// Start GetAlbum and multipart body reading in parallel.
+	albumCh := make(chan albumResult, 1)
+	go func() {
+		a, err := h.db.GetAlbum(ctx, albumID)
+		albumCh <- albumResult{a, err}
+	}()
 
-	// Stream the multipart body — find the "photo" part
+	// Stream the multipart body — find the "photo" part (runs concurrently with GetAlbum)
 	mr, err := c.Request.MultipartReader()
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing or malformed multipart form"})
@@ -71,12 +73,23 @@ func (h *PhotoHandler) UploadPhoto(c *gin.Context) {
 		return
 	}
 
-	// Peek up to 5MB+1 to determine file size
+	// Peek up to 5MB+1 to determine file size (also runs while GetAlbum may still be in flight)
 	peek := make([]byte, smallFileThreshold+1)
 	n, readErr := io.ReadFull(photoPart, peek)
 	isSmall := readErr == io.ErrUnexpectedEOF || readErr == io.EOF
 	if !isSmall && readErr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to read photo"})
+		return
+	}
+
+	// Wait for album check result
+	ar := <-albumCh
+	if ar.err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check album"})
+		return
+	}
+	if ar.album == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 		return
 	}
 
@@ -91,7 +104,8 @@ func (h *PhotoHandler) UploadPhoto(c *gin.Context) {
 	finalKey := fmt.Sprintf("albums/%s/photos/%s", albumID, photoID)
 
 	if isSmall {
-		// Small file: create DB record, return 202 immediately, upload S3+SQS in background
+		// Small file: create DB record, return 202 immediately, upload S3 + mark completed in background.
+		// No SQS involved — worker is bypassed entirely for small files.
 		buf := make([]byte, n)
 		copy(buf, peek[:n])
 
@@ -115,7 +129,7 @@ func (h *PhotoHandler) UploadPhoto(c *gin.Context) {
 			Status:  "processing",
 		})
 
-		// Async: upload to S3 and notify worker
+		// Async: upload to S3, then directly mark completed in DynamoDB (skip SQS + worker roundtrip)
 		go func() {
 			bgCtx := context.Background()
 			if err := h.s3.UploadBytes(bgCtx, finalKey, buf); err != nil {
@@ -123,9 +137,9 @@ func (h *PhotoHandler) UploadPhoto(c *gin.Context) {
 				_ = h.db.UpdatePhotoFailed(bgCtx, photoID)
 				return
 			}
-			msg := store.PhotoMessage{PhotoID: photoID, AlbumID: albumID, S3Key: finalKey}
-			if err := h.sqs.SendPhotoMessage(bgCtx, msg); err != nil {
-				log.Printf("ERROR: async SQS send for photo %s: %v", photoID, err)
+			publicURL := h.s3.PublicURL(finalKey)
+			if err := h.db.UpdatePhotoCompleted(bgCtx, photoID, publicURL, finalKey); err != nil {
+				log.Printf("ERROR: async mark completed for photo %s: %v", photoID, err)
 			}
 		}()
 		return
