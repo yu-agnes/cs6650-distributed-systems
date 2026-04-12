@@ -16,7 +16,7 @@ variable "container_port" {
 # How many API tasks to run (increase for load testing)
 variable "api_task_count" {
   type    = number
-  default = 5
+  default = 8
 }
 
 # How many Worker tasks to run
