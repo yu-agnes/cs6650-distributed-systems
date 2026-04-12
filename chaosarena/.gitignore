@@ -1,0 +1,7 @@
+# Terraform provider binaries
+terraform/.terraform/
+
+# Terraform state files (contain sensitive resource info)
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+terraform/terraform.tfstate.*.backup
