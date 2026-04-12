@@ -23,9 +23,9 @@ func NewSQSStore(client *sqs.Client, queueURL string) *SQSStore {
 
 // PhotoMessage is the message sent to SQS when a photo upload is accepted.
 type PhotoMessage struct {
-	PhotoID  string `json:"photo_id"`
-	AlbumID  string `json:"album_id"`
-	S3TempKey string `json:"s3_temp_key"`
+	PhotoID string `json:"photo_id"`
+	AlbumID string `json:"album_id"`
+	S3Key   string `json:"s3_key"` // final S3 key (already uploaded by API)
 }
 
 // SendPhotoMessage sends a message to the SQS queue to notify the worker.

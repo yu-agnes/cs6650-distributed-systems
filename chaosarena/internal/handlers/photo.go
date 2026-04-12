@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 
@@ -23,11 +24,8 @@ func NewPhotoHandler(db *store.DynamoStore, s3 *store.S3Store, sqs *store.SQSSto
 }
 
 // UploadPhoto handles POST /albums/:album_id/photos
-// 1. Atomically increment seq counter
-// 2. Upload photo to S3 temp location
-// 3. Write "processing" record to DynamoDB
-// 4. Send SQS message to worker
-// 5. Return 202 immediately
+// Streams the upload directly to the final S3 location (no temp copy).
+// Worker only needs to update DynamoDB status — no S3 operations.
 func (h *PhotoHandler) UploadPhoto(c *gin.Context) {
 	albumID := c.Param("album_id")
 	ctx := c.Request.Context()
@@ -43,13 +41,31 @@ func (h *PhotoHandler) UploadPhoto(c *gin.Context) {
 		return
 	}
 
-	// Parse multipart form - get the photo file and its header (for size)
-	file, header, err := c.Request.FormFile("photo")
+	// Stream the multipart body — find the "photo" part without buffering to disk
+	mr, err := c.Request.MultipartReader()
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "missing or malformed photo field"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing or malformed multipart form"})
 		return
 	}
-	defer file.Close()
+	var photoPart io.Reader
+	for {
+		part, partErr := mr.NextPart()
+		if partErr == io.EOF {
+			break
+		}
+		if partErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "malformed multipart form"})
+			return
+		}
+		if part.FormName() == "photo" {
+			photoPart = part
+			break
+		}
+	}
+	if photoPart == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing photo field"})
+		return
+	}
 
 	// Step 1: Atomically get next seq number
 	seq, err := h.db.IncrementPhotoSeq(ctx, albumID)
@@ -59,11 +75,11 @@ func (h *PhotoHandler) UploadPhoto(c *gin.Context) {
 		return
 	}
 
-	// Step 2: Generate photo ID and upload to S3 temp location
+	// Step 2: Stream directly to final S3 location (no temp key, no disk buffering)
 	photoID := uuid.New().String()
-	tempKey := fmt.Sprintf("temp/%s/%s", albumID, photoID)
+	finalKey := fmt.Sprintf("albums/%s/photos/%s", albumID, photoID)
 
-	if err := h.s3.Upload(ctx, tempKey, file, header.Size); err != nil {
+	if err := h.s3.Upload(ctx, finalKey, photoPart); err != nil {
 		log.Printf("ERROR: upload photo %s to S3: %v", photoID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to upload photo"})
 		return
@@ -75,24 +91,23 @@ func (h *PhotoHandler) UploadPhoto(c *gin.Context) {
 		AlbumID: albumID,
 		Seq:     seq,
 		Status:  "processing",
-		S3Key:   tempKey,
+		S3Key:   finalKey,
 	}
 	if err := h.db.PutPhoto(ctx, photo); err != nil {
 		log.Printf("ERROR: put photo record %s: %v", photoID, err)
+		_ = h.s3.Delete(ctx, finalKey)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create photo record"})
 		return
 	}
 
 	// Step 4: Send message to worker via SQS
 	msg := store.PhotoMessage{
-		PhotoID:   photoID,
-		AlbumID:   albumID,
-		S3TempKey: tempKey,
+		PhotoID: photoID,
+		AlbumID: albumID,
+		S3Key:   finalKey,
 	}
 	if err := h.sqs.SendPhotoMessage(ctx, msg); err != nil {
 		log.Printf("ERROR: send SQS message for photo %s: %v", photoID, err)
-		// Photo is already in "processing" state - worker won't pick it up
-		// but we still return 202 since the record exists
 	}
 
 	// Step 5: Return 202 Accepted
@@ -122,35 +137,27 @@ func (h *PhotoHandler) GetPhoto(c *gin.Context) {
 }
 
 // DeletePhoto handles DELETE /albums/:album_id/photos/:photo_id
-// Must complete within 5 seconds. Deletes both DynamoDB record and S3 file.
 func (h *PhotoHandler) DeletePhoto(c *gin.Context) {
 	albumID := c.Param("album_id")
 	photoID := c.Param("photo_id")
 	ctx := c.Request.Context()
 
-	// Get the photo to find its S3 key
 	photo, err := h.db.GetPhoto(ctx, photoID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get photo"})
 		return
 	}
 	if photo == nil || photo.AlbumID != albumID {
-		// Already deleted, never existed, or belongs to a different album - return 204
 		c.Status(http.StatusNoContent)
 		return
 	}
 
-	// Delete from S3 (if there's a file).
-	// After completion, s3_key points to the final location; for in-progress
-	// photos it points to the temp location. One delete covers both cases.
 	if photo.S3Key != "" {
 		if err := h.s3.Delete(ctx, photo.S3Key); err != nil {
 			log.Printf("ERROR: delete S3 object %s: %v", photo.S3Key, err)
-			// Continue to delete DynamoDB record even if S3 fails
 		}
 	}
 
-	// Delete from DynamoDB
 	if err := h.db.DeletePhoto(ctx, photoID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete photo"})
 		return

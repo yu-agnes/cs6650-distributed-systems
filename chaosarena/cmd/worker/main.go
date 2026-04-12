@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -56,9 +55,6 @@ func main() {
 	db := store.NewDynamoStore(dynamoClient, albumsTable, photosTable)
 	s3Store := store.NewS3Store(s3Client, s3Bucket, region)
 
-	// Semaphore to limit concurrent photo processing (avoid S3/DynamoDB throttling)
-	sem := make(chan struct{}, 5)
-
 	log.Printf("Worker started. Polling SQS: %s", sqsQueueURL)
 
 	// Main polling loop
@@ -84,14 +80,13 @@ func main() {
 			continue
 		}
 
+		// Process all messages in the batch concurrently
 		var wg sync.WaitGroup
 		for _, msg := range result.Messages {
-			sem <- struct{}{}
 			wg.Add(1)
 			go func(m sqstypes.Message) {
 				defer wg.Done()
-				defer func() { <-sem }()
-				processMessage(ctx, db, s3Store, s3Client, s3Bucket, region, sqsClient, sqsQueueURL, m)
+				processMessage(ctx, db, s3Store, sqsClient, sqsQueueURL, m)
 			}(msg)
 		}
 		wg.Wait()
@@ -102,8 +97,6 @@ func processMessage(
 	ctx context.Context,
 	db *store.DynamoStore,
 	s3Store *store.S3Store,
-	s3Client *s3.Client,
-	bucket, region string,
 	sqsClient *sqs.Client,
 	queueURL string,
 	msg sqstypes.Message,
@@ -118,36 +111,15 @@ func processMessage(
 
 	log.Printf("Processing photo %s for album %s", photoMsg.PhotoID, photoMsg.AlbumID)
 
-	// Copy from temp to final location in S3
-	finalKey := fmt.Sprintf("albums/%s/photos/%s", photoMsg.AlbumID, photoMsg.PhotoID)
-	copySource := fmt.Sprintf("%s/%s", bucket, photoMsg.S3TempKey)
+	// Photo is already at the final S3 location (uploaded by API).
+	// Worker only needs to update DynamoDB status to "completed".
+	publicURL := s3Store.PublicURL(photoMsg.S3Key)
 
-	_, err := s3Client.CopyObject(ctx, &s3.CopyObjectInput{
-		Bucket:     &bucket,
-		Key:        &finalKey,
-		CopySource: &copySource,
-	})
-	if err != nil {
-		log.Printf("ERROR: copy S3 object for photo %s: %v", photoMsg.PhotoID, err)
-		_ = db.UpdatePhotoFailed(ctx, photoMsg.PhotoID)
-		deleteMsg(ctx, sqsClient, queueURL, msg)
-		return
-	}
-
-	// Delete the temp file (best effort)
-	_ = s3Store.Delete(ctx, photoMsg.S3TempKey)
-
-	// Update DynamoDB: status -> "completed", set url and s3_key
-	publicURL := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", bucket, region, finalKey)
-	if err := db.UpdatePhotoCompleted(ctx, photoMsg.PhotoID, publicURL, finalKey); err != nil {
+	if err := db.UpdatePhotoCompleted(ctx, photoMsg.PhotoID, publicURL, photoMsg.S3Key); err != nil {
 		log.Printf("ERROR: update photo %s to completed: %v", photoMsg.PhotoID, err)
-		deleteMsg(ctx, sqsClient, queueURL, msg)
-		return
 	}
 
 	log.Printf("Photo %s completed: %s", photoMsg.PhotoID, publicURL)
-
-	// Acknowledge: delete SQS message
 	deleteMsg(ctx, sqsClient, queueURL, msg)
 }
 
