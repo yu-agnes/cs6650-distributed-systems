@@ -10,7 +10,7 @@ variable "aws_region" {
 
 variable "lab_role_arn" {
   type    = string
-  default = "arn:aws:iam::801832435422:role/LabRole"
+  default = "arn:aws:iam::823613469987:role/ecsTaskExecutionRole"
 }
 
 variable "worker_count" {
